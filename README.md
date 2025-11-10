@@ -82,3 +82,4 @@ print(df.head())
 ## Notes
 - The code expects `accounts_columns.csv` in the project root to infer fields when you don't pass `fields` explicitly.
 - This script does not perform remote calls during install; you must have valid Salesforce credentials to fetch records.
+- use salesforce-bulk
