@@ -1,0 +1,3 @@
+simple-salesforce>=1.12.0
+pandas>=1.5.0
+# Optional: add other packages you use (e.g., requests)
