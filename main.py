@@ -18,7 +18,7 @@ import argparse
 import os
 from typing import Optional
 
-from fetcher.salesforce import SalesforceFetcher
+from fetcher import SalesforceFetcher
 from fetcher.serp import SerpEnricher
 from fetcher.labeler import LabelProposer
 

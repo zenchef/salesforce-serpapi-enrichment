@@ -1,19 +1,21 @@
+# Salesforce Account fetcher + SerpApi enrichment
 
-# SalesforceAccountFetcher
+This repository fetches Salesforce Account records (many fields) in a chunked, parallel way and can enrich those records with Google/Maps data via SerpApi. The code was refactored into a small `fetcher` package with OOP helpers:
 
-This repository provides a small utility to fetch Salesforce Account records (`SalesforceAccountFetcher` in `main.py`) and a standalone SerpApi enrichment helper.
+- `fetcher.salesforce.SalesforceFetcher` — fetch Account rows as a pandas DataFrame (chunked field queries, id batching, parallel workers).
+- `fetcher.serp.SerpEnricher` — enrich a DataFrame of Accounts via SerpApi (explicit place_id support, retries/backoff, parallel requests).
+- `fetcher.labeler.LabelProposer` — simple CSV label proposer (used for the Known_Internal_Issue CSV you provided).
 
-## Contents
+There is a lightweight CLI entrypoint `main.py` with two commands:
 
-- `main.py` — `SalesforceAccountFetcher` (fetch Accounts via `simple-salesforce`, returns list or pandas DataFrame).
-- `serpapi_enrich.py` — standalone SerpApi enrichment script (reads CSV, queries SerpApi Google results, writes JSON/CSV). Does NOT call Salesforce; suitable for local testing.
-- `job_enrich_accounts.py` — job runner (uses `main.py` + SerpApi enrichment logic; may be present in the repo).
-- `Dockerfile` — original project Dockerfile used to run `job_enrich_accounts.py` (left unchanged).
-- `Dockerfile.serpapi` — new Dockerfile to build an image for running `serpapi_enrich.py` without touching the original Dockerfile.
+- `enrich` — fetch accounts and enrich them with SerpApi, optionally write CSV.
+- `label` — propose labels for a Known_Internal_Issue CSV using the labeler.
 
-## Setup
+This README documents quick setup and usage for the current code layout.
 
-1) Create a virtualenv and install requirements:
+## Quick setup
+
+1. Create a virtualenv and install dependencies:
 
 ```bash
 python -m venv .venv
@@ -21,15 +23,24 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2) Environment variables for Salesforce (two supported approaches)
+2. Install SerpApi client into the same Python interpreter you use to run scripts:
 
-- Connected App (preferred when using a client id/secret):
+```bash
+python -m pip install --upgrade google-search-results
+```
+
+If you get an ImportError for `GoogleSearch` (e.g. "cannot import name 'GoogleSearch' from 'serpapi'"), it's usually because the package was installed under a different Python installation. Re-run the pip command with the exact python binary you use (for example `/usr/local/bin/python3 -m pip install --upgrade google-search-results`).
+
+## Authentication (Salesforce)
+
+Two common ways to authenticate (the code accepts several env-var name variants):
+
+- Connected App / Consumer credentials (preferred when available):
 
 ```bash
 export CONSUMER_KEY=your_consumer_key
 export CONSUMER_SECRET=your_consumer_secret
-# domain is either the org instance (e.g. 'organization.my') or 'login' / 'test'
-export DOMAIN=organization.my
+export SF_DOMAIN=login   # or 'test' for sandbox
 ```
 
 - Username/password + security token (fallback):
@@ -38,119 +49,64 @@ export DOMAIN=organization.my
 export SF_USERNAME=you@example.com
 export SF_PASSWORD=yourpassword
 export SF_SECURITY_TOKEN=yoursecuritytoken
-export DOMAIN=login   # or 'test' for sandbox
+export SF_DOMAIN=login
 ```
 
-The `SalesforceAccountFetcher` prefers `CONSUMER_KEY`/`CONSUMER_SECRET` + `DOMAIN` when present, otherwise it falls back to `SF_USERNAME`/`SF_PASSWORD`/`SF_SECURITY_TOKEN`.
+The `fetcher.SalesforceFetcher` will try a variety of names (SF_USERNAME, SFDC_USERNAME, CONSUMER_KEY, etc.) to maximize compatibility with existing CI or local env setups.
 
-## Using `SalesforceAccountFetcher` (example)
+## CLI usage (recommended)
 
-```python
-from main import SalesforceAccountFetcher
-import os
-
-fetcher = SalesforceAccountFetcher(
-		consumer_key=os.getenv("CONSUMER_KEY"),
-		consumer_secret=os.getenv("CONSUMER_SECRET"),
-		domain=os.getenv("DOMAIN", os.getenv("SF_DOMAIN", "login")),
-)
-
-df = fetcher.get_all_accounts_df(limit=100)
-print(df.head())
-```
-
-## SerpApi enrichment (standalone)
-
-`serpapi_enrich.py` is a small, independent script that reads an input CSV (default `./accounts_sample.csv`), builds a search query per row (prefers Website, otherwise Name + City/Country), queries SerpApi's Google engine, and appends a few SerpApi fields (`serpapi_title`, `serpapi_link`, `serpapi_snippet`) to each row. It writes JSON and optionally CSV output.
-
-Usage locally:
+1) Enrich accounts (fetch + SerpApi enrich) and save CSV:
 
 ```bash
-python serpapi_enrich.py --api-key YOUR_SERPAPI_KEY --input ./accounts_sample.csv --output ./accounts_enriched.json --limit 50 --pause 1.0 --csv-out
+python main.py enrich --api-key YOUR_SERPAPI_KEY --limit 100 --output out/enriched.csv
 ```
 
-Docker image for the SerpApi script (separate from the project Dockerfile):
+Flags of interest:
+- `--api-key` : SerpApi API key (or set `SERPAPI_API_KEY` env var)
+- `--limit` : number of accounts to fetch
+- `--chunk-size` : number of fields per SOQL query chunk (default 40)
+- `--workers` : number of parallel Salesforce queries
+- `--serp-workers` : number of parallel SerpApi requests
+
+2) Propose labels for a Known_Internal_Issue CSV (wrapper around the refactored labeler):
 
 ```bash
-docker build -f Dockerfile.serpapi -t serpapi-enrich .
-
-# mount the input CSV and an output folder
-mkdir -p out
-docker run --rm -v "$(pwd)/out:/app/out" -v "$(pwd)/accounts_sample.csv:/app/accounts_sample.csv:ro" \
-	-e SERPAPI_API_KEY="YOUR_KEY" \
-	serpapi-enrich python serpapi_enrich.py --api-key "$SERPAPI_API_KEY" --input /app/accounts_sample.csv --output /app/out/accounts_enriched.json --limit 50 --pause 1.0 --csv-out
+python main.py label --input path/to/Known_Internal_Issue__c-19_11_2025.csv --output out/labeled.csv
 ```
 
-## Docker: running the job that uses `main.py`
- 
-The existing `Dockerfile` in the repo builds an image used by `job_enrich_accounts.py` and imports `main.py`. If you modify `main.py`, rebuild the image before running to pick up changes:
+## Programmatic usage (library)
 
-```bash
-docker build -t serpapi-job .
+You can import the classes directly from the `fetcher` package if you want to script or test things:
 
-# Example run with Connected App creds
-docker run --rm \
-	-e CONSUMER_KEY="$CONSUMER_KEY" -e CONSUMER_SECRET="$CONSUMER_SECRET" -e DOMAIN="$DOMAIN" \
-	-e SERPAPI_API_KEY="$SERPAPI_API_KEY" \
-	serpapi-job python job_enrich_accounts.py --api-key "$SERPAPI_API_KEY" --limit 50 --output /app/out/accounts_enriched.json
+```py
+from fetcher.salesforce import SalesforceFetcher
+from fetcher.serp import SerpEnricher
+
+sf = SalesforceFetcher()  # uses env vars if you don't pass a Simple-Salesforce instance
+df = sf.fetch_accounts(limit=200)
+
+enr = SerpEnricher(api_key="MY_KEY")
+enriched = enr.enrich(df, save_csv="out/enriched.csv")
 ```
 
-If you prefer the username/password fallback use `SF_USERNAME`, `SF_PASSWORD`, and `SF_SECURITY_TOKEN` env vars instead of `CONSUMER_KEY`/`CONSUMER_SECRET`.
+## Notes on behavior and tuning
 
-## Notes & recommendations
+- The field list used for Account queries comes from `account_fields.py` and is intentionally large. The fetcher splits fields into chunks (`chunk_size`) and queries each chunk in parallel to avoid SOQL length limits.
+- When `--limit` is provided the fetcher first queries the Ids and then batches them into smaller `IN (...)` groups (controlled by `id_batch_size`) to avoid enormous IN clauses.
+- If Salesforce returns INVALID_FIELD for a field present in `account_fields`, the fetcher will call `Account.describe()` and drop invalid fields for the failing chunk, then retry.
+- For very large exports consider using the Bulk API / data export instead of pulling all fields into memory.
 
-- Do not commit secrets to the repository. Use environment variables, Docker secrets, or a vault.
-- For production, consider implementing the JWT Bearer OAuth flow (no passwords in env). I can help add it if you want.
-- `serpapi_enrich.py` is purposely standalone: it does not import `main.py` or call Salesforce. If you want a wrapper that fetches Accounts via `SalesforceAccountFetcher` and then calls SerpApi to enrich them, I can add one.
+## Troubleshooting
+
+- SerpApi import errors: ensure `google-search-results` is installed into the same Python you run (see the install note above).
+- Salesforce auth errors: check env-var names and values; the code looks for many common names (`SF_USERNAME`, `SFDC_USERNAME`, `CONSUMER_KEY`, etc.).
+
+## Next steps (optional)
+
+- Add a small test suite for `SalesforceFetcher` and `SerpEnricher` (I can scaffold pytest tests).
+- Add a Docker Compose or `.env` example for easier local runs.
 
 ---
 
-If you'd like a short README section with exact `.env` or Docker Compose examples, tell me which workflow you prefer (Connected App or JWT) and I'll add it.
-
-## sf_fetch.py — batched Id + parallel field queries
-
-This repository also includes `sf_fetch.py`, a helper that fetches the full set of Account fields defined in `account_fields.AccountFields` and returns a merged `pandas.DataFrame`.
-
-Key points
-- The module splits the very large field list into smaller `chunk_size` groups and runs SOQL queries for each chunk in parallel (using a ThreadPoolExecutor).
-- When `limit` is provided, the function first queries the Account Ids and then splits those Ids into batches (`id_batch_size`) to avoid creating huge `IN(...)` clauses in SOQL.
-- The final result merges data by `Id` across all field-chunk and id-batch queries.
-
-Function signature (important params):
-
-```py
-fetch_accounts(sf: Optional[Salesforce] = None,
-			   limit: Optional[int] = None,
-			   chunk_size: int = 40,
-			   workers: int = 5,
-			   id_batch_size: int = 200) -> pandas.DataFrame
-```
-
-Usage examples
-
-Use environment variables (recommended):
-
-```bash
-export SF_USERNAME=you@example.com
-export SF_PASSWORD=yourpassword
-export SF_SECURITY_TOKEN=yoursecuritytoken
-export SF_DOMAIN=login
-
-python -c "from sf_fetch import fetch_accounts; df = fetch_accounts(limit=500); print(df.shape)"
-```
-
-Or pass a pre-built `Salesforce` instance:
-
-```py
-from simple_salesforce import Salesforce
-from sf_fetch import fetch_accounts
-
-sf = Salesforce(username='..', password='..', security_token='..', domain='login')
-df = fetch_accounts(sf=sf, limit=200, chunk_size=50, workers=6, id_batch_size=100)
-```
-
-Notes
-- If a field name in `account_fields.AccountFields` is invalid, the chunked query that contains it will raise an error.
-- Tune `chunk_size` and `id_batch_size` if you hit SOQL length limits.
-- For very large exports consider a different approach (bulk API / data export) rather than fetching all fields into memory.
-
+If you'd like, I can also update the repository's top-level `requirements.txt` or add a `pyproject.toml` for reproducible installs and for running unit tests. Tell me which you'd prefer and I'll add it.
