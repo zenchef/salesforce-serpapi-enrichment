@@ -1,0 +1,21 @@
+# Ignore local artifacts and secrets
+.env
+*.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.env.backup
+.DS_Store
+.git
+.gitignore
+coverage.xml
+htmlcov/
+.cache/
+.mypy_cache/
+.pytest_cache/
+merge_summary.json
+accounts_backup.csv
+sf_cleaner_report.csv

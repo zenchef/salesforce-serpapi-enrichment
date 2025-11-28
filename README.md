@@ -156,4 +156,66 @@ Databricks notes
 - To run on Databricks, install required libraries on the cluster (`pandas`, `simple-salesforce`, `google-search-results`) and ensure environment variables are available to the driver. Use `dbutils.secrets` to store credentials and set env vars in the notebook before running the CLI logic.
 
 
+## 🐳 Containerization
+
+A `Dockerfile` is provided for running the enrichment / dedupe jobs inside a container (isolated runtime, easy scheduling).
+
+### Build the image
+
+```bash
+docker build -t serp-enrich .
+```
+
+### Run (dry-run enrichment)
+
+```bash
+docker run --rm \
+	-e SERPAPI_API_KEY=YOUR_KEY \
+	-e SF_USERNAME=you@example.com \
+	-e SF_PASSWORD=yourPassword \
+	-e SF_SECURITY_TOKEN=yourToken \
+	serp-enrich --limit 200 --log-level INFO
+```
+
+### Apply updates + deduplicate (CAUTION: will write & delete)
+
+```bash
+docker run --rm \
+	-e SERPAPI_API_KEY=YOUR_KEY \
+	-e SF_USERNAME=you@example.com \
+	-e SF_PASSWORD=yourPassword \
+	-e SF_SECURITY_TOKEN=yourToken \
+	serp-enrich --commit --merge --log-level INFO
+```
+
+### Override entrypoint / run legacy enrich command
+
+```bash
+docker run --rm -e SERPAPI_API_KEY=$SERPAPI_API_KEY \
+	-e SF_USERNAME=$SF_USERNAME -e SF_PASSWORD=$SF_PASSWORD -e SF_SECURITY_TOKEN=$SF_SECURITY_TOKEN \
+	serp-enrich python main.py enrich --api-key $SERPAPI_API_KEY --limit 100 --output /app/out.csv
+```
+
+### Secrets
+- Do not bake `.env` into the image (it's ignored via `.dockerignore`).
+- Use orchestrator secret stores (Kubernetes, ECS, etc.) for production runs.
+
+### Image details
+- Base: `python:3.11-slim` with build tools for `pandas`.
+- Non-root user `appuser` for runtime security.
+- ENTRYPOINT defaults to `tools/sf_cleaner.py`; supply args for behavior.
+
+### Suggested two-phase workflow
+1. Dry-run:
+	 ```bash
+	 docker run --rm -e SERPAPI_API_KEY=$KEY -e SF_USERNAME=$SFU -e SF_PASSWORD=$SFP -e SF_SECURITY_TOKEN=$SFT \
+		 serp-enrich --limit 5000 --log-level INFO --backup /app/backup.csv --report /app/report.csv
+	 ```
+2. Review `report.csv`, then commit + merge:
+	 ```bash
+	 docker run --rm -e SERPAPI_API_KEY=$KEY -e SF_USERNAME=$SFU -e SF_PASSWORD=$SFP -e SF_SECURITY_TOKEN=$SFT \
+		 serp-enrich --commit --merge --log-level INFO
+	 ```
+
+
 
