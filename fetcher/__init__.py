@@ -4,6 +4,7 @@
 # SalesforceFetcher from the stable implementation file.
 from .salesforce_impl import SalesforceFetcher
 from .serp import SerpEnricher
-from .labeler import LabelProposer
 
-__all__ = ["SalesforceFetcher", "SerpEnricher", "LabelProposer"]
+# labeler module may not be present in all branches/environments; avoid importing it at package
+# import time to keep the package lightweight. Import it explicitly where needed.
+__all__ = ["SalesforceFetcher", "SerpEnricher"]

@@ -49,7 +49,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 	enrich = sub.add_parser("enrich")
 	enrich.add_argument("--api-key", required=True, help="SerpApi API key")
-	enrich.add_argument("--limit", type=int, default=100, help="How many accounts to fetch")
+	enrich.add_argument("--limit", type=int, default=None, help="How many accounts to fetch (omit for no limit)")
 	enrich.add_argument("--chunk-size", type=int, default=40)
 	enrich.add_argument("--workers", type=int, default=5)
 	enrich.add_argument("--serp-workers", type=int, default=5)

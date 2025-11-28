@@ -107,6 +107,53 @@ enriched = enr.enrich(df, save_csv="out/enriched.csv")
 - Add a small test suite for `SalesforceFetcher` and `SerpEnricher` (I can scaffold pytest tests).
 - Add a Docker Compose or `.env` example for easier local runs.
 
----
 
-If you'd like, I can also update the repository's top-level `requirements.txt` or add a `pyproject.toml` for reproducible installs and for running unit tests. Tell me which you'd prefer and I'll add it.
+## SF Cleaner CLI (enrich Accounts & deduplicate by Google Place ID)
+
+This repository includes a safe CLI to enrich Salesforce Accounts with Google My Business data (via SERPapi) and deduplicate accounts by Google Place ID: `tools/sf_cleaner.py`.
+
+What it does
+- Fetch Accounts (optionally limited).
+- Back up a CSV of fetched Accounts before any writes.
+- Enrich Accounts that do NOT have `Google_Place_ID__c` using SERPapi.
+- Produce a report CSV describing proposed updates and a `merge_summary.json` when merging duplicates.
+- Optionally apply updates and deletions to Salesforce when invoked with `--commit` and `--merge`.
+
+Safety and defaults
+- The script is DRY-RUN by default: it will not write or delete in Salesforce unless `--commit` is passed.
+- Always review the backup CSV and the report before using `--commit`.
+
+Quick examples
+
+- Dry-run enrich (safe; does not write to Salesforce):
+
+```bash
+python tools/sf_cleaner.py --limit 100 --backup /tmp/accounts_backup.csv --report /tmp/sf_cleaner_report.csv
+```
+
+- Apply updates (writes updates) and run deduplication (will DELETE duplicates):
+
+```bash
+python tools/sf_cleaner.py --limit 200 --commit --merge --backup /tmp/accounts_backup.csv --report /tmp/sf_cleaner_report.csv
+```
+
+Important environment variables
+- Salesforce credentials: the fetcher supports multiple env var names; common ones:
+	- `SF_USERNAME`, `SF_PASSWORD`, `SF_SECURITY_TOKEN`, `CONSUMER_KEY`, `CONSUMER_SECRET`, `SF_DOMAIN`
+- SERPapi key: the script looks for `SERPAPI_API_KEY` in the environment. It also accepts common variants in a `.env` file such as `SERPAPI_KEY` or the misspelling `SEPRAPI_KEY`; the script will load `.env` at the repo root and export `SERPAPI_API_KEY` automatically for the run.
+
+Outputs
+- Backup CSV (default `accounts_backup.csv`, configurable with `--backup`).
+- Report CSV (default `sf_cleaner_report.csv`, configurable with `--report`).
+- Merge summary JSON (`merge_summary.json`) containing details of reparenting and deletions.
+
+Requirements
+- `pandas`
+- `simple-salesforce`
+- `google-search-results` (SERPapi client)
+
+Databricks notes
+- To run on Databricks, install required libraries on the cluster (`pandas`, `simple-salesforce`, `google-search-results`) and ensure environment variables are available to the driver. Use `dbutils.secrets` to store credentials and set env vars in the notebook before running the CLI logic.
+
+
+
