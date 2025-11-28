@@ -24,6 +24,7 @@ import argparse
 import csv
 import os
 import sys
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -69,6 +70,8 @@ _load_dotenv_and_set_serpapi_key()
 
 from fetcher.salesforce_impl import SalesforceFetcher
 from fetcher.serp import SerpEnricher
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
 
 def _backup_df(df: pd.DataFrame, path: str) -> None:
@@ -237,31 +240,38 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument("--commit", action="store_true", help="Apply updates and deletions to Salesforce (otherwise dry-run)")
 	parser.add_argument("--merge", action="store_true", help="Run deduplication/merge step after enrichment")
 	parser.add_argument("--limit-enrich-only", action="store_true", help="Only enrich subset then exit (helper)")
+	parser.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"], help="Logging level")
+	parser.add_argument("--progress-interval", type=int, default=500, help="Log progress every N enrichments")
 	args = parser.parse_args(argv)
 
 	dry_run = not args.commit
 
-	print("Connecting to Salesforce...")
+	logging.basicConfig(level=getattr(logging, args.log_level), format=LOG_FORMAT)
+	logger = logging.getLogger("sf_cleaner")
+	logger.info("Start run dry_run=%s merge=%s limit=%s", dry_run, args.merge, args.limit)
+
+	logger.info("Connecting to Salesforce...")
 	sf_fetcher = SalesforceFetcher()
 	sf = sf_fetcher.sf
 
-	print("Fetching Accounts...")
+	logger.info("Fetching Accounts...")
 	df = sf_fetcher.fetch_accounts(limit=args.limit)
 	if df.empty:
-		print("No accounts fetched. Exiting.")
+		logger.warning("No accounts fetched. Exiting.")
 		return 0
 
 	# Backup
 	_backup_df(df, args.backup)
+	logger.info("Fetched rows=%d columns=%d backup=%s", len(df), len(df.columns), args.backup)
 
 	# Enrich only accounts lacking Google_Place_ID__c
 	to_enrich = df[df.get("Google_Place_ID__c").isna() | (df.get("Google_Place_ID__c") == "")]
 	if to_enrich.empty:
-		print("No accounts to enrich (all have Google_Place_ID__c).")
+		logger.info("No accounts to enrich (all have Google_Place_ID__c).")
 	else:
-		print(f"Enriching {len(to_enrich)} accounts via SERPapi (dry_run={dry_run})...")
+		logger.info("Enriching accounts count=%d dry_run=%s", len(to_enrich), dry_run)
 		enricher = SerpEnricher()
-		merged = enricher.enrich(df, workers=args.workers, save_csv=None)
+		merged = enricher.enrich(df, workers=args.workers, save_csv=None, progress_interval=args.progress_interval)
 
 		# fields of interest to update
 		fields_to_update = [
@@ -277,7 +287,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 		]
 
 		updates = _collect_updates(df, merged, fields_to_update)
-		print(f"Found {len(updates)} accounts with changes to apply.")
+		logger.info("Proposed updates count=%d", len(updates))
 
 		# Write report header + rows
 		report_rows = []
@@ -286,6 +296,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 		# Apply updates
 		applied = _apply_updates(sf, updates, dry_run=dry_run, workers=args.workers)
+		success_updates = sum(1 for r in applied if r.get("status") == ("updated" if not dry_run else "dry-run"))
+		error_updates = sum(1 for r in applied if r.get("status") == "error")
+		logger.info("Update results success=%d errors=%d", success_updates, error_updates)
 
 		# Merge applied info into report
 		for r in applied:
@@ -298,30 +311,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 				writer.writeheader()
 				for row in report_rows:
 					writer.writerow(row)
-			print(f"Wrote report to {args.report}")
+			logger.info("Report written path=%s rows=%d", args.report, len(report_rows))
 		except Exception as e:
-			print(f"Failed to write report CSV: {e}")
+			logger.error("Failed writing report path=%s error=%s", args.report, e)
 
 		# Optionally stop here
 		if args.limit_enrich_only:
-			print("Exiting after enrichment-only run")
+			logger.info("Exiting after enrichment-only run")
 			return 0
 
 	# Reload accounts to include any changes (or use merged dataframe in dry-run)
 	if dry_run:
 		df_after = merged if 'merged' in locals() else df
 	else:
-		print("Re-fetching accounts post-update...")
+		logger.info("Re-fetching accounts post-update...")
 		df_after = sf_fetcher.fetch_accounts(limit=args.limit)
 
 	# Deduplication
 	if args.merge:
-		print("Detecting duplicate Google_Place_ID__c groups...")
+		logger.info("Detecting duplicates (Google_Place_ID__c)...")
 		groups = _find_duplicate_groups(df_after)
-		print(f"Found {len(groups)} duplicate groups (Google_Place_ID__c shared by >1 account).")
+		logger.info("Duplicate groups found=%d", len(groups))
 		merge_summaries = []
 		for place_id, ids in groups.items():
-			print(f"Processing group place_id={place_id} ids={ids}")
+			logger.info("Merging group place_id=%s size=%d", place_id, len(ids))
 			summary = _process_duplicate_group(sf, df_after, ids, dry_run=dry_run)
 			summary["place_id"] = place_id
 			merge_summaries.append(summary)
@@ -333,11 +346,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 			with open(out_path, "w") as fh:
 				json.dump(merge_summaries, fh, default=str, indent=2)
-			print(f"Wrote merge summary to {out_path}")
+			logger.info("Merge summary written path=%s groups=%d", out_path, len(merge_summaries))
 		except Exception as e:
-			print(f"Failed to write merge summary: {e}")
+			logger.error("Failed writing merge summary error=%s", e)
 
-	print("Done.")
+	logger.info("Run complete dry_run=%s", dry_run)
 	return 0
 
 

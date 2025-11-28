@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import random
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # try robust import
 try:
@@ -110,9 +113,11 @@ class SerpEnricher:
         hl: Optional[str] = None,
         gl: Optional[str] = None,
         google_domain: Optional[str] = None,
+        progress_interval: int = 250,
     ) -> pd.DataFrame:
         if GoogleSearch is None:
             raise ImportError("SerpApi GoogleSearch client not available; install google-search-results")
+        logger.info("Starting enrichment run: rows=%d workers=%d engine=%s", len(df), workers, engine)
         if "Id" not in df.columns:
             raise ValueError("DataFrame must contain an 'Id' column")
 
@@ -187,13 +192,23 @@ class SerpEnricher:
                 try:
                     search = GoogleSearch(params)
                     resp = search.get_dict()
-                    return _parse_serp_result(resp)
+                    parsed = _parse_serp_result(resp)
+                    if parsed.get("Google_Place_ID__c"):
+                        logger.debug("Enriched rid=%s place_id=%s", rid, parsed.get("Google_Place_ID__c"))
+                    return parsed
                 except Exception as e:
                     if attempts >= max_retries:
-                        print(f"SerpApi error for Id={rid} after {attempts} attempts: {e}")
+                        logger.warning("SerpApi error rid=%s after %d attempts: %s", rid, attempts, e)
                         return {}
                     sleep_for = backoff_factor * (2 ** (attempts - 1)) + random.random() * 0.5
-                    print(f"SerpApi transient error for Id={rid}, attempt {attempts}/{max_retries}: {e}. Retrying in {sleep_for:.1f}s")
+                    logger.info(
+                        "Transient SerpApi error rid=%s attempt=%d/%d: %s; retrying in %.1fs",
+                        rid,
+                        attempts,
+                        max_retries,
+                        e,
+                        sleep_for,
+                    )
                     time.sleep(sleep_for)
                 finally:
                     if pause:
@@ -208,8 +223,11 @@ class SerpEnricher:
             else:
                 # preserve explicit empty result so merge will keep original row
                 results_by_id[rid] = {}
+        logger.info("Rows needing enrichment: %d (skipped=%d)", len(rows_to_search), len(df) - len(rows_to_search))
 
         # Parallelize SerpApi calls only for selected rows
+        completed = 0
+        errors = 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(_worker_search, i, rid, row): rid for (i, rid, row) in rows_to_search}
             for fut in as_completed(futures):
@@ -217,9 +235,16 @@ class SerpEnricher:
                 try:
                     res = fut.result()
                 except Exception as e:
-                    print(f"Unexpected error enriching {rid}: {e}")
+                    logger.error("Unexpected worker error rid=%s: %s", rid, e)
                     res = {}
+                    errors += 1
                 results_by_id[rid] = res
+                completed += 1
+                if progress_interval and completed % progress_interval == 0:
+                    logger.info(
+                        "Progress: %d/%d (%.1f%%) errors=%d", completed, len(rows_to_search), (completed/len(rows_to_search))*100 if rows_to_search else 100, errors
+                    )
+        logger.info("Enrichment complete: processed=%d errors=%d", completed, errors)
 
         # Build a DataFrame from results and merge
         enrich_rows = []
@@ -233,8 +258,8 @@ class SerpEnricher:
         if save_csv:
             try:
                 merged.to_csv(save_csv, index=False)
-                print(f"Wrote enriched CSV to: {save_csv}")
+                logger.info("Saved enriched CSV path=%s rows=%d", save_csv, len(merged))
             except Exception as e:
-                print(f"Failed to write CSV to {save_csv}: {e}")
+                logger.error("Failed to write enriched CSV path=%s error=%s", save_csv, e)
         return merged
 
